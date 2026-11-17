@@ -1,0 +1,48 @@
+name: Limpeza segura de artefatos do GitHub Actions
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/limpeza-artefatos.yml'
+  workflow_dispatch:
+permissions:
+  actions: write
+  contents: read
+jobs:
+  limpar-artefatos:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remover artefatos temporários antigos preservando dois de cada tipo
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cutoff=$(date -u -d '24 hours ago' +%s)
+          file=$(mktemp)
+          page=1
+          while true; do
+            response=$(gh api "repos/$GH_REPO/actions/artifacts?per_page=100&page=$page")
+            jq -c '.artifacts[]' <<< "$response" >> "$file"
+            count=$(jq '.artifacts | length' <<< "$response")
+            if [ "$count" -lt 100 ]; then break; fi
+            page=$((page+1))
+          done
+          mapfile -t targets < <(jq -sr '[.[]] | group_by(.name) | map(sort_by(.created_at) | reverse | .[2:]) | flatten | .[] | [.id, .name, .created_at] | @tsv' "$file")
+          removed=0
+          kept=0
+          for item in "${targets[@]}"; do
+            IFS=$'\t' read -r id name created <<< "$item"
+            created_epoch=$(date -u -d "$created" +%s)
+            if [ "$created_epoch" -ge "$cutoff" ]; then
+              kept=$((kept+1))
+              continue
+            fi
+            echo "Excluindo artefato temporário antigo: $name ($id)"
+            gh api --method DELETE "repos/$GH_REPO/actions/artifacts/$id"
+            removed=$((removed+1))
+          done
+          echo "Artefatos excluídos: $removed; artefatos recentes adicionais preservados: $kept"
+          echo "Preservados pelo menos os dois artefatos mais recentes de cada tipo."
+          echo "Nenhum código, Release, pacote publicado, histórico ou arquivo de projeto foi apagado."
